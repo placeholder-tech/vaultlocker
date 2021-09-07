@@ -41,6 +41,7 @@ class VaultlockerFuncBaseTestCase(base.BaseTestCase):
 
         self.vault_addr = os.environ.get('PIFPAF_VAULT_ADDR')
         self.root_token = os.environ.get('PIFPAF_ROOT_TOKEN')
+        self.mount_point = 'vaultlocker'
 
         self.test_uuid = str(uuid.uuid4())
         self.vault_backend = 'vaultlocker-test-{}'.format(self.test_uuid)
@@ -53,40 +54,54 @@ class VaultlockerFuncBaseTestCase(base.BaseTestCase):
         self.vault_client = hvac.Client(url=self.vault_addr,
                                         token=self.root_token)
 
-        self.vault_client.enable_secret_backend(
+        self.vault_client.sys.enable_secrets_engine(
             backend_type='kv',
             description='vault test backend',
-            mount_point=self.vault_backend
+            path=self.vault_backend
         )
 
         try:
-            self.vault_client.enable_auth_backend('approle')
+            self.vault_client.sys.enable_auth_method(
+                method_type='approle',
+                path=self.mount_point
+            )
         except hvac.exceptions.InvalidRequest:
             pass
 
-        self.vault_client.set_policy(
+        self.vault_client.sys.create_or_update_policy(
             name=self.vault_policy,
-            rules=TEST_POLICY.format(backend=self.vault_backend)
+            policy=TEST_POLICY.format(backend=self.vault_backend)
         )
 
-        self.vault_client.create_role(
-            self.vault_approle,
+        self.vault_client.auth.approle.create_or_update_approle(
+            role_name=self.vault_approle,
             token_ttl='60s',
             token_max_ttl='60s',
-            policies=[self.vault_policy],
+            token_policies=[self.vault_policy],
             bind_secret_id='true',
-            bound_cidr_list='127.0.0.1/32')
-        self.approle_uuid = self.vault_client.get_role_id(self.vault_approle)
+            token_bound_cidrs=['127.0.0.1/32'],
+            mount_point=self.mount_point)
+        self.role_id = self.vault_client.auth.approle.read_role_id(
+            role_name=self.vault_approle,
+            mount_point=self.mount_point
+        )["data"]["role_id"]
+
         self.secret_id = self.vault_client.write(
-            'auth/approle/role/{}/secret-id'.format(self.vault_approle)
+            'auth/{}/role/{}/secret-id'
+            .format(
+                self.mount_point,
+                self.vault_approle
+            )
         )['data']['secret_id']
 
         self.test_config = {
             'vault': {
                 'url': self.vault_addr,
-                'approle': self.approle_uuid,
+                'role_id': self.role_id,
                 'secret_id': self.secret_id,
                 'backend': self.vault_backend,
+                'mount_point': self.mount_point,
+                'kv_version': '1'
             }
         }
         self.config = mock.MagicMock()
@@ -96,5 +111,6 @@ class VaultlockerFuncBaseTestCase(base.BaseTestCase):
     def tearDown(self):
         super(VaultlockerFuncBaseTestCase, self).tearDown()
         if self.vault_client:
-            self.vault_client.disable_secret_backend(self.vault_backend)
-            self.vault_client.delete_policy(self.vault_policy)
+            self.vault_client.sys.disable_secrets_engine(
+                path=self.vault_backend)
+            self.vault_client.sys.delete_policy(name=self.vault_policy)

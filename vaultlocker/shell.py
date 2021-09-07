@@ -40,23 +40,32 @@ def _vault_client(config):
     """
     client = hvac.Client(
         url=config.get('vault', 'url'),
-        verify=config.get('vault', 'ca_bundle', fallback=True)
+        token=config.get('vault', 'token', fallback=None),
+        verify=config.get('vault', 'ca_bundle', fallback=True),
+        namespace=config.get('vault', 'namespace', fallback=None)
     )
-    client.auth_approle(config.get('vault', 'approle'),
-                        secret_id=config.get('vault', 'secret_id'))
+    if not config.get('vault', 'role_id', fallback=None) is None:
+        role_id = config.get('vault', 'role_id')
+    if not config.get('vault', 'approle', fallback=None) is None:
+        role_id = config.get('vault', 'approle')
+    client.auth.approle.login(
+        role_id,
+        secret_id=config.get('vault', 'secret_id', fallback=None),
+        mount_point=config.get('vault', 'mount_point')
+    )
     return client
 
 
-def _get_vault_path(device_uuid, config):
+def _get_vault_path(device_uuid):
     """Generate full vault path for a given block device UUID
 
     :param: device_uuid: String of the device UUID
-    :param: config: configparser object of vaultlocker config
     :returns: str: Path to vault resource for device
     """
-    return '{}/{}/{}'.format(config.get('vault', 'backend'),
-                             socket.gethostname(),
-                             device_uuid)
+    return '{}/{}'.format(
+        socket.gethostname(),
+        device_uuid
+    )
 
 
 def _encrypt_block_device(args, client, config):
@@ -71,12 +80,31 @@ def _encrypt_block_device(args, client, config):
     block_device = args.block_device[0]
     key = dmcrypt.generate_key()
     block_uuid = str(uuid.uuid4()) if not args.uuid else args.uuid
-    vault_path = _get_vault_path(block_uuid, config)
+    vault_path = _get_vault_path(block_uuid)
+    service_name = 'vaultlocker-decrypt@{}.service'.format(block_uuid)
+    mount_point = config.get('vault', 'backend')
+
+    if systemd.service_enabled(service_name):
+        logger.info('Systemd unit file exists for {} '
+                    'exiting...'.format(block_uuid))
+        raise exceptions.VaultlockerException(
+            'Block UUID {} was already encrypted.'.format(block_uuid)
+        )
 
     # NOTE: store and validate key before trying to encrypt disk
     try:
-        client.write(vault_path,
-                     dmcrypt_key=key)
+        if config.get('vault', 'kv_version') == '2':
+            client.secrets.kv.v2.create_or_update_secret(
+                vault_path,
+                secret=dict(dmcrypt_key=key),
+                mount_point=mount_point
+            )
+        elif config.get('vault', 'kv_version') == '1':
+            client.secrets.kv.v1.create_or_update_secret(
+                vault_path,
+                secret=dict(dmcrypt_key=key),
+                mount_point=mount_point
+            )
     except hvac.exceptions.VaultError as write_error:
         logger.error(
             'Vault write to path {}. Failed with error: {}'.format(
@@ -84,13 +112,28 @@ def _encrypt_block_device(args, client, config):
         raise exceptions.VaultWriteError(vault_path, write_error)
 
     try:
-        stored_data = client.read(vault_path)
+        if config.get('vault', 'kv_version') == '2':
+            stored_data = client.secrets.kv.v2.read_secret_version(
+                vault_path,
+                mount_point=mount_point
+            )['data']['data']
+        elif config.get('vault', 'kv_version') == '1':
+            stored_data = client.secrets.kv.v1.read_secret(
+                vault_path,
+                mount_point=mount_point
+            )['data']
     except hvac.exceptions.VaultError as read_error:
-        logger.error('Vault access to path {}'
-                     'failed with error: {}'.format(vault_path, read_error))
+        logger.error('Vault access to path {}/{}'
+                     'failed with error: {}'
+                     .format(
+                         mount_point,
+                         vault_path,
+                         read_error
+                     )
+                     )
         raise exceptions.VaultReadError(vault_path, read_error)
 
-    if not key == stored_data['data']['dmcrypt_key']:
+    if not key == stored_data['dmcrypt_key']:
         raise exceptions.VaultKeyMismatch(vault_path)
 
     # All function calls within try/catch raise a CalledProcessError
@@ -112,13 +155,22 @@ def _encrypt_block_device(args, client, config):
                 luks_error.output))
 
         try:
-            client.delete(vault_path)
+            if config.get('vault', 'kv_version') == '2':
+                client.secrets.kv.v2.delete_metadata_and_all_versions(
+                    vault_path,
+                    mount_point=mount_point
+                )
+            elif config.get('vault', 'kv_version') == '1':
+                client.secrets.kv.v1.delete_secret(
+                    vault_path,
+                    mount_point=mount_point
+                )
         except hvac.exceptions.VaultError as del_error:
             raise exceptions.VaultDeleteError(vault_path, del_error)
 
         raise exceptions.LUKSFailure(block_device, luks_error.output)
 
-    systemd.enable('vaultlocker-decrypt@{}.service'.format(block_uuid))
+    systemd.enable(service_name)
 
 
 def _decrypt_block_device(args, client, config):
@@ -131,18 +183,32 @@ def _decrypt_block_device(args, client, config):
     :param: config: configparser object of vaultlocker config
     """
     block_uuid = args.uuid[0]
-
     if _device_exists(block_uuid):
         logger.info('Skipping setup of {} because '
                     'it already exists.'.format(block_uuid))
         return
+    stored_data = None
+    vault_path = _get_vault_path(block_uuid)
+    mount_point = config.get('vault', 'backend')
 
-    vault_path = _get_vault_path(block_uuid, config)
+    try:
+        if config.get('vault', 'kv_version') == '2':
+            stored_data = client.secrets.kv.v2.read_secret_version(
+                vault_path,
+                mount_point=mount_point
+            )['data']['data']
+        elif config.get('vault', 'kv_version') == '1':
+            stored_data = client.secrets.kv.v1.read_secret(
+                vault_path,
+                mount_point=mount_point
+            )['data']
+    except Exception:
+        logger.info('Couldn\'t read the secret at key: {}/{}'
+                    .format(mount_point, vault_path))
 
-    stored_data = client.read(vault_path)
     if stored_data is None:
         raise ValueError('Unable to locate key for {}'.format(block_uuid))
-    key = stored_data['data']['dmcrypt_key']
+    key = stored_data['dmcrypt_key']
 
     dmcrypt.luks_open(key, block_uuid)
 
@@ -204,7 +270,7 @@ def get_config(config_path):
     :param: config_path: path to the configuration file
     :returns: configparser. Parsed configuration options
     """
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser({'kv_version': '1'})
     if os.path.exists(config_path):
         config.read(config_path)
     else:

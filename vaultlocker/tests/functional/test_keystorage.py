@@ -37,6 +37,7 @@ class KeyStorageTestCase(base.VaultlockerFuncBaseTestCase):
         args.uuid = 'passed-UUID'
         args.block_device = ['/dev/sdb']
         args.retry = -1
+        _systemd.service_enabled.return_value = False
 
         shell.encrypt(args, self.config)
         _luks_format.assert_called_once_with(mock.ANY,
@@ -47,13 +48,18 @@ class KeyStorageTestCase(base.VaultlockerFuncBaseTestCase):
         _systemd.enable.assert_called_once_with(
             'vaultlocker-decrypt@passed-UUID.service'
         )
+        _systemd.service_enabled.assert_called_with(
+            'vaultlocker-decrypt@passed-UUID.service'
+        )
         _udevadm_rescan.assert_called_once_with('/dev/sdb')
         _udevadm_settle.assert_called_once_with('passed-UUID')
 
-        stored_data = self.vault_client.read(
-            shell._get_vault_path('passed-UUID',
-                                  self.config)
-        )
+        stored_data = self.vault_client.secrets.kv.v1 \
+                          .read_secret(
+                              shell._get_vault_path('passed-UUID'),
+                              mount_point=self.vault_backend
+                          )
+
         self.assertIsNotNone(stored_data,
                              'Key data missing from vault')
         self.assertIn('dmcrypt_key', stored_data['data'],
@@ -66,9 +72,12 @@ class KeyStorageTestCase(base.VaultlockerFuncBaseTestCase):
         args.uuid = ['passed-UUID']
         args.retry = -1
 
-        self.vault_client.write(shell._get_vault_path('passed-UUID',
-                                                      self.config),
-                                dmcrypt_key='testkey')
+        self.vault_client.secrets.kv.v1 \
+            .create_or_update_secret(
+                shell._get_vault_path('passed-UUID'),
+                secret=dict(dmcrypt_key='testkey'),
+                mount_point=self.vault_backend
+            )
 
         shell.decrypt(args, self.config)
         _luks_format.assert_not_called()
