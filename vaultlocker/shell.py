@@ -50,8 +50,7 @@ def _vault_client(config):
         role_id = config.get('vault', 'approle')
     client.auth.approle.login(
         role_id,
-        secret_id=config.get('vault', 'secret_id', fallback=None),
-        mount_point=config.get('vault', 'mount_point')
+        secret_id=config.get('vault', 'secret_id', fallback=None)
     )
     return client
 
@@ -62,11 +61,12 @@ def _get_vault_path(device_uuid):
     :param: device_uuid: String of the device UUID
     :returns: str: Path to vault resource for device
     """
-    return '{}/{}'.format(
-        socket.gethostname(),
-        device_uuid
-    )
+    # return '{}/{}'.format(
+    #     socket.gethostname(),
+    #     device_uuid
+    # )
 
+    return device_uuid
 
 def _encrypt_block_device(args, client, config):
     """Encrypt and open a block device
