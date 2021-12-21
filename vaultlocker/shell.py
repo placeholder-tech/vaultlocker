@@ -84,12 +84,12 @@ def _encrypt_block_device(args, client, config):
     service_name = 'vaultlocker-decrypt@{}.service'.format(block_uuid)
     mount_point = config.get('vault', 'backend')
 
-    if systemd.service_enabled(service_name):
-        logger.info('Systemd unit file exists for {} '
-                    'exiting...'.format(block_uuid))
-        raise exceptions.VaultlockerException(
-            'Block UUID {} was already encrypted.'.format(block_uuid)
-        )
+    # if systemd.service_enabled(service_name):
+    #     logger.info('Systemd unit file exists for {} '
+    #                 'exiting...'.format(block_uuid))
+    #     raise exceptions.VaultlockerException(
+    #         'Block UUID {} was already encrypted.'.format(block_uuid)
+    #     )
 
     # NOTE: store and validate key before trying to encrypt disk
     try:
@@ -170,7 +170,7 @@ def _encrypt_block_device(args, client, config):
 
         raise exceptions.LUKSFailure(block_device, luks_error.output)
 
-    systemd.enable(service_name)
+    #systemd.enable(service_name)
 
 
 def _decrypt_block_device(args, client, config):
